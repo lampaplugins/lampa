@@ -1,0 +1,307 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lampa — загрузка</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; }
+
+  .lampa-loader {
+    position: fixed; left: 0; top: 0; right: 0; bottom: 0; z-index: 9999;
+    background: #000; overflow: hidden;
+    -webkit-transition: opacity .6s; transition: opacity .6s;
+  }
+  .lampa-loader--hidden { opacity: 0; pointer-events: none; }
+
+  /* 110 × 104 logo: 20% of the short side in landscape, 28% in portrait;
+     the arcs' centre (58/104 of the height) sits on the screen centre */
+  .lampa-loader__mark {
+    position: absolute; left: 50%; top: 50%;
+    width: 20vmin; height: 18.91vmin;
+    margin: -10.55vmin 0 0 -10vmin;
+  }
+  @media (orientation: portrait) {
+    .lampa-loader__mark { width: 28vmin; height: 26.47vmin; margin: -14.76vmin 0 0 -14vmin; }
+  }
+  .lampa-loader__mark svg { display: block; width: 100%; height: 100%; overflow: visible; }
+
+  .lampa-loader__hint {
+    position: absolute; left: 0; right: 0; bottom: 7vmin; text-align: center;
+    font: 14px/1.4 "SegoeUI", "Segoe UI", Roboto, Arial, sans-serif; font-size: calc(10px + 1vmin);
+    color: rgba(255,255,255,.45); padding: 0 16px;
+    opacity: 0; -webkit-transition: opacity .4s; transition: opacity .4s;
+  }
+  .lampa-loader__hint--show { opacity: 1; }
+</style>
+</head>
+<body>
+
+<div class="lampa-loader" id="lampa-loader">
+  <div class="lampa-loader__mark">
+    <svg viewBox="0 0 110 104" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <g>
+        <path opacity="0" fill="#fff" d="M81.6744 103.11C98.5682 93.7234 110 75.6967 110 55C110 24.6243 85.3757 0 55 0C24.6243 0 0 24.6243 0 55C0 75.6967 11.4318 93.7234 28.3255 103.11C14.8869 94.3724 6 79.224 6 62C6 34.938 27.938 13 55 13C82.062 13 104 34.938 104 62C104 79.224 95.1131 94.3725 81.6744 103.11Z"/>
+        <path opacity="0" fill="#fff" d="M92.9546 80.0076C95.5485 74.5501 97 68.4446 97 62C97 38.804 78.196 20 55 20C31.804 20 13 38.804 13 62C13 68.4446 14.4515 74.5501 17.0454 80.0076C16.3618 77.1161 16 74.1003 16 71C16 49.4609 33.4609 32 55 32C76.5391 32 94 49.4609 94 71C94 74.1003 93.6382 77.1161 92.9546 80.0076Z"/>
+        <path opacity="0" fill="#fff" d="M55 89C69.3594 89 81 77.3594 81 63C81 57.9297 79.5486 53.1983 77.0387 49.1987C82.579 54.7989 86 62.5 86 71C86 88.1208 72.1208 102 55 102C37.8792 102 24 88.1208 24 71C24 62.5 27.421 54.7989 32.9613 49.1987C30.4514 53.1983 29 57.9297 29 63C29 77.3594 40.6406 89 55 89Z"/>
+        <path opacity="0" fill="#fff" d="M73 63C73 72.9411 64.9411 81 55 81C45.0589 81 37 72.9411 37 63C37 53.0589 45.0589 45 55 45C64.9411 45 73 53.0589 73 63Z"/>
+      </g>
+    </svg>
+  </div>
+  <div class="lampa-loader__hint">Браузер заглушил звук — нажмите, чтобы проиграть со звуком</div>
+</div>
+
+<script>
+/*
+ * Lampa loading logo: four arcs light up on four notes (C5 E5 G5 C6), then a chord (Fmaj7).
+ * Sound is synthesized with the Web Audio API, no files needed. ES5 on purpose (old TV browsers).
+ *
+ *   LampaLoader.play()   start from the beginning (called automatically on load)
+ *   LampaLoader.hide()   fade the loader out, e.g. when the app is ready
+ *
+ * Browsers may block sound until the first click/keypress; the animation then plays silently.
+ */
+(function () {
+  'use strict';
+
+  var OPTIONS = {
+    sound: true,
+    volume: 0.4,  // 1 = as loud as the intro video (about −15 LUFS); 0.4 ≈ −23 LUFS, quiet
+    idle: true,   // after the chord, the arcs gently dim in turn while the app is still loading
+    demo: true    // standalone page: show a hint when sound is blocked, replay on click / OK
+  };
+
+  var LEAD = 0.3;          // silence before the first arc, s
+  var ARCS = [             // outer arc → dot: when it lights, which bell rings
+    { t: 0.06, note: 72 },
+    { t: 0.21, note: 76 },
+    { t: 0.36, note: 79 },
+    { t: 0.51, note: 84 }
+  ];
+  var CHORD_T = 0.85;
+  var IDLE_FROM = 2.6;
+  var FULL = 1.5;          // level that matches the intro video; OPTIONS.volume scales it
+
+  var root = document.getElementById('lampa-loader');
+  var group = root.getElementsByTagName('g')[0];
+  var paths = root.getElementsByTagName('path');
+  var hint = root.querySelector('.lampa-loader__hint');
+
+  // centre of every arc for scaling it in place (works without CSS transform-box)
+  var centres = [];
+  for (var i = 0; i < paths.length; i++) {
+    var b = paths[i].getBBox();
+    centres.push([b.x + b.width / 2, b.y + b.height / 2]);
+  }
+
+  // ---------- easing ----------
+  function clamp(x, a, b) { return Math.min(b === undefined ? 1 : b, Math.max(a || 0, x)); }
+  function seg(t, a, b) { return clamp((t - a) / (b - a)); }
+  function lerp(a, b, p) { return a + (b - a) * p; }
+  function outCubic(p) { return 1 - Math.pow(1 - p, 3); }
+  function outBack(p) { var s = 1.4; return 1 + (s + 1) * Math.pow(p - 1, 3) + s * Math.pow(p - 1, 2); }
+  function scaleAbout(cx, cy, s) { return 'translate(' + cx + ' ' + cy + ') scale(' + s + ') translate(' + (-cx) + ' ' + (-cy) + ')'; }
+
+  // ---------- picture: a pure function of time ----------
+  function render(T) {
+    var idle = OPTIONS.idle ? seg(T, IDLE_FROM, IDLE_FROM + 0.8) : 0;
+    for (var i = 0; i < paths.length; i++) {
+      var a = ARCS[i].t, k = seg(T, a, a + 0.28);
+      var o = clamp(k * 1.6);
+      if (idle > 0) {
+        var ph = ((T - IDLE_FROM) / 1.8 - i * 0.14) % 1;
+        if (ph < 0) ph += 1;
+        var dip = Math.pow(Math.sin(Math.PI * clamp(ph / 0.4)), 2);
+        o *= 1 - 0.45 * dip * idle;
+      }
+      paths[i].setAttribute('opacity', o.toFixed(3));
+      paths[i].setAttribute('transform', scaleAbout(centres[i][0], centres[i][1], lerp(0.82, 1, outBack(k))));
+    }
+    // the chord: a small pulse through the whole mark
+    var pulse = Math.sin(Math.PI * outCubic(seg(T, CHORD_T, CHORD_T + 0.45)));
+    group.setAttribute('transform', scaleAbout(55, 58, 1 + 0.05 * pulse));
+  }
+
+  // ---------- sound ----------
+  var ctx = null;
+  function getCtx() {
+    if (ctx || !OPTIONS.sound) return ctx;
+    var AC = window.AudioContext || window.webkitAudioContext;
+    try { if (AC) ctx = new AC(); } catch (e) { ctx = null; }
+    return ctx;
+  }
+
+  function mtof(m) { return 440 * Math.pow(2, (m - 69) / 12); }
+
+  // short stereo room: decaying noise, darkened, 20 ms pre-delay
+  function makeRoom(ac) {
+    var sr = ac.sampleRate, n = Math.floor(sr * 2.2), buf = ac.createBuffer(2, n, sr);
+    var a = 1 - Math.exp(-2 * Math.PI * 5000 / sr);
+    for (var c = 0; c < 2; c++) {
+      var d = buf.getChannelData(c), y = 0, e = 0, k;
+      for (k = 0; k < n; k++) {
+        y += a * ((Math.random() * 2 - 1) - y);
+        d[k] = k < sr * 0.02 ? 0 : y * Math.exp(-k / sr / 0.38);
+        e += d[k] * d[k];
+      }
+      e = Math.sqrt(e) || 1;
+      for (k = 0; k < n; k++) d[k] /= e;
+    }
+    return buf;
+  }
+
+  function makeBus(ac, out) {
+    var master = ac.createGain(); master.gain.value = FULL * OPTIONS.volume;
+    var limit = ac.createDynamicsCompressor();
+    limit.threshold.value = -3; limit.knee.value = 3; limit.ratio.value = 12;
+    limit.attack.value = 0.003; limit.release.value = 0.25;
+    var hp = ac.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 28;
+    var dry = ac.createGain();
+    var room = ac.createConvolver(); room.normalize = false; room.buffer = makeRoom(ac);
+    var wet = ac.createGain(); wet.gain.value = 0.22;
+    dry.connect(hp); room.connect(wet); wet.connect(hp);
+    hp.connect(master); master.connect(limit); limit.connect(out || ac.destination);
+    return { dry: dry, room: room };
+  }
+
+  function panNode(ac, pan) {
+    if (!ac.createStereoPanner) return ac.createGain();
+    var p = ac.createStereoPanner(); p.pan.value = pan; return p;
+  }
+
+  // a struck voice: sine partials [ratio, amp, decay/s], each with its own exponential decay
+  function strike(ac, bus, when, f, partials, gain, pan, send, attack, dur) {
+    var sum = ac.createGain(); sum.gain.value = gain * Math.SQRT2;
+    var p = panNode(ac, pan);
+    sum.connect(p); p.connect(bus.dry);
+    var s = ac.createGain(); s.gain.value = send; p.connect(s); s.connect(bus.room);
+    for (var i = 0; i < partials.length; i++) {
+      var fr = f * partials[i][0];
+      if (fr > 15000) break;
+      var o = ac.createOscillator(), g = ac.createGain();
+      o.frequency.value = fr;
+      g.gain.setValueAtTime(0, when);
+      g.gain.linearRampToValueAtTime(partials[i][1], when + attack);
+      g.gain.setTargetAtTime(0, when + attack, 1 / partials[i][2]);
+      o.connect(g); g.connect(sum);
+      o.start(when); o.stop(when + dur);
+    }
+  }
+
+  function bell(ac, bus, when, note, gain, pan, send) {
+    strike(ac, bus, when, mtof(note),
+      [[1, 1 / 1.5, 2.2], [2.0, .45 / 1.5, 3.5], [3.01, .22 / 1.5, 5.5], [4.16, .12 / 1.5, 8], [5.43, .07 / 1.5, 12]],
+      gain, pan, send, 0.002, 1.8);
+  }
+
+  function pluck(ac, bus, when, note, gain, send) {
+    var parts = [];
+    for (var k = 1; k < 14; k++) parts.push([k, 1 / Math.pow(k, 1.25) / 1.6, 2.5 + 0.4 * 6 * k]);
+    strike(ac, bus, when, mtof(note), parts, gain, 0, send, 0.003, 1.6);
+  }
+
+  function tick(ac, bus, when) {
+    strike(ac, bus, when, mtof(96), [[1, 1, 47], [3.93, .25, 62], [9.2, .08, 100]], 0.12, 0, 0.03, 0.002, 0.08);
+  }
+
+  // Fmaj7 pad: three detuned saws per note, low-passed, slow attack
+  function pad(ac, bus, when) {
+    var notes = [53, 57, 60, 64], cents = [-9, 0, 8], pans = [-0.6, 0, 0.6];
+    var lp = ac.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 1200; lp.Q.value = Math.SQRT1_2;
+    var env = ac.createGain();
+    var hold = 2.2, end = when + hold + 1.6;
+    env.gain.setValueAtTime(0, when);
+    env.gain.linearRampToValueAtTime(1 / 12, when + 0.5);
+    env.gain.setValueAtTime(1 / 12, when + hold);
+    env.gain.setTargetAtTime(0, when + hold, 0.4);
+    lp.connect(env);
+    var d = ac.createGain(); d.gain.value = 0.78; env.connect(d); d.connect(bus.dry);
+    var s = ac.createGain(); s.gain.value = 0.35; env.connect(s); s.connect(bus.room);
+    for (var i = 0; i < notes.length; i++) {
+      for (var j = 0; j < 3; j++) {
+        var o = ac.createOscillator();
+        o.type = 'sawtooth';
+        o.frequency.value = mtof(notes[i]) * Math.pow(2, cents[j] / 1200);
+        var p = panNode(ac, pans[j]);
+        o.connect(p); p.connect(lp);
+        o.start(when); o.stop(end);
+      }
+    }
+  }
+
+  // the whole piece; `when` is the moment of the first arc minus LEAD
+  function sound(ac, when, out) {
+    var bus = makeBus(ac, out), t = when + LEAD;
+    for (var i = 0; i < ARCS.length; i++) {
+      bell(ac, bus, t + ARCS[i].t, ARCS[i].note, 0.16, -0.3 + 0.2 * i, 0.16);
+    }
+    tick(ac, bus, t + CHORD_T);
+    pluck(ac, bus, t + CHORD_T, 65, 0.22, 0.055);
+    pluck(ac, bus, t + CHORD_T + 0.02, 69, 0.18, 0.045);
+    pluck(ac, bus, t + CHORD_T + 0.04, 72, 0.16, 0.24);
+    pad(ac, bus, t + CHORD_T);
+  }
+
+  // ---------- playback ----------
+  var raf = window.requestAnimationFrame || window.webkitRequestAnimationFrame ||
+            function (f) { return setTimeout(function () { f(); }, 16); };
+  var caf = window.cancelAnimationFrame || window.webkitCancelAnimationFrame || clearTimeout;
+  var nowMs = window.performance && performance.now ? function () { return performance.now(); } : function () { return +new Date(); };
+  var t0 = 0, frame = 0, runId = 0;
+
+  function loop() {
+    var T = (nowMs() - t0) / 1000 - LEAD;
+    render(T);
+    if (T < IDLE_FROM || OPTIONS.idle) frame = raf(loop);
+  }
+
+  function begin(withSound) {
+    var latency = 0;
+    if (withSound) {
+      var at = ctx.currentTime + 0.05;
+      sound(ctx, at);
+      latency = 0.05 + (ctx.outputLatency || ctx.baseLatency || 0);
+    }
+    hint.className = 'lampa-loader__hint' + (OPTIONS.demo && OPTIONS.sound && !withSound ? ' lampa-loader__hint--show' : '');
+    t0 = nowMs() + latency * 1000;
+    caf(frame);
+    loop();
+  }
+
+  function play() {
+    var id = ++runId, ac = getCtx();
+    root.className = 'lampa-loader';
+    render(-1);
+    if (!ac) return begin(false);
+    if (ac.state === 'running') return begin(true);
+    var done = false;
+    var go = function (ok) { if (!done && id === runId) { done = true; begin(ok); } };
+    var p = null;
+    try { p = ac.resume && ac.resume(); } catch (e) {}
+    if (p && p.then) p.then(function () { go(ac.state === 'running'); }, function () { go(false); });
+    setTimeout(function () { go(ac.state === 'running'); }, 200);  // blocked: start silently
+  }
+
+  function hide() {
+    root.className = 'lampa-loader lampa-loader--hidden';
+    setTimeout(function () { caf(frame); }, 700);
+  }
+
+  if (OPTIONS.demo) {
+    var replay = function (e) {
+      if (e.type === 'keydown' && [13, 32, 82].indexOf(e.keyCode) < 0) return;   // OK / Space / R
+      play();
+    };
+    document.addEventListener('click', replay);
+    document.addEventListener('touchend', replay);
+    document.addEventListener('keydown', replay);
+  }
+
+  function stop() { runId++; caf(frame); }   // for tests: freeze the picture
+
+  window.LampaLoader = { play: play, hide: hide, _render: render, _sound: sound, _stop: stop };
+  play();
+})();
+</script>
+</body>
+</html>
